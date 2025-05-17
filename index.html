@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D 动态粒子系统 V2</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; color: #fff; font-family: Arial, sans-serif; }
+        canvas { display: block; }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            padding: 10px;
+            background: rgba(0,0,0,0.7);
+            border-radius: 8px;
+            max-width: 280px;
+        }
+        #controls label, #controls span { display: block; margin-bottom: 5px; font-size: 0.9em; }
+        #controls input[type="file"],
+        #controls input[type="range"],
+        #controls select,
+        #controls audio {
+            width: calc(100% - 10px);
+            margin-bottom: 10px;
+        }
+        #tooltip {
+            position: absolute;
+            padding: 5px;
+            background: rgba(0,0,0,0.6);
+            border-radius: 3px;
+            color: white;
+            font-size: 0.8em;
+            pointer-events: none; /* So it doesn't interfere with mouse controls */
+            display: none; /* Hidden by default */
+        }
+        .color-btn {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            border: 2.5px solid #fff;
+            margin: 0 10px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+            cursor: pointer;
+            outline: none;
+            display: inline-block;
+            transition: transform 0.12s, box-shadow 0.18s;
+            position: relative;
+            background: #fff;
+        }
+        .color-btn:active {
+            transform: scale(0.92);
+            box-shadow: 0 1px 3px rgba(0,0,0,0.22);
+        }
+        .color-btn.selected {
+            box-shadow: 0 0 0 4px #fff, 0 2px 8px rgba(0,0,0,0.18);
+        }
+        .color-red {background: #ff0033;}
+        .color-green {background: #00ff66;}
+        .color-blue {background: #0050ff;}
+        .color-yellow {background: #ffe600;}
+        .color-purple {background: #a100ff;}
+        .color-redblue {background: linear-gradient(90deg,#ff0033,#00c3ff);}
+        .color-blueyellow {background: linear-gradient(90deg,#0050ff,#ffe600);}
+        .color-purpleorange {background: linear-gradient(90deg,#a100ff,#ff9900);}
+        .color-cyanorange {background: linear-gradient(90deg,#00fff7,#ff6a00);}
+        .color-pinkcyan {background: linear-gradient(90deg,#ff4fd8,#00ffe7);}
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <button id="control-toggle" style="margin:18px 0 0 0;padding:8px 28px;font-size:17px;border-radius:22px;background:#e0e0e0;color:#333;border:none;box-shadow:0 2px 8px rgba(0,0,0,0.08);cursor:pointer;">Control</button>
+        <div id="control-panel" style="display:none;margin-top:18px;">
+            <label for="shapeSelector">Current Shape:</label>
+            <select id="shapeSelector" disabled></select>
+            <label for="musicFile">Select Music File:</label>
+            <input type="file" id="musicFile" accept="audio/*">
+            <audio id="audioPlayer" controls loop></audio>
+            <hr>
+            <label for="switchSpeed">Shape Switch Interval (seconds): <span id="switchSpeedValue">5</span></label>
+            <input type="range" id="switchSpeed" min="1" max="30" value="5">
+            <label for="rotationSpeedRange">Particle Rotation Speed: <span id="rotationSpeedValue">0.1</span></label>
+            <input type="range" id="rotationSpeedRange" min="0" max="0.5" value="0.1" step="0.01">
+            <div style="margin-top:10px;color:#fff;font-size:14px;">Music will loop (single track repeat)</div>
+        </div>
+    </div>
+    <div id="tooltip"></div>
+    <div id="color-controls" style="position:fixed;bottom:0;left:0;width:100%;background:rgba(0,0,0,0.85);padding:18px 0 22px 0;text-align:center;z-index:10;">
+        <button class="color-btn color-red" data-color="red"></button>
+        <button class="color-btn color-green" data-color="green"></button>
+        <button class="color-btn color-blue" data-color="blue"></button>
+        <button class="color-btn color-yellow" data-color="yellow"></button>
+        <button class="color-btn color-purple" data-color="purple"></button>
+        <button class="color-btn color-redblue" data-color="redblue"></button>
+        <button class="color-btn color-blueyellow" data-color="blueyellow"></button>
+        <button class="color-btn color-purpleorange" data-color="purpleorange"></button>
+        <button class="color-btn color-cyanorange" data-color="cyanorange"></button>
+        <button class="color-btn color-pinkcyan" data-color="pinkcyan"></button>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.164.1/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.164.1/examples/jsm/"
+            }
+        }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+        let scene, camera, renderer, controls, composer;
+        let particleSystem;
+        const particleCount = 12000;
+        const particleSize = 0.035;
+
+        let currentParticleRotationSpeed = 0.0001; // Initial internal rotation speed
+
+        const shapes = [
+            { name: 'Sphere', generator: generateSpherePositions },
+            { name: 'Torus', generator: generateTorusPositions },
+            { name: 'Cube', generator: generateCubePositions },
+            { name: 'Heart', generator: generateHeartPositions },
+            { name: 'Star', generator: generateStarPositions },
+            { name: 'Petal Ball', generator: generatePetalBallPositions },
+            { name: 'Nebula', generator: generateNebulaPositions },
+            { name: 'Pyramid', generator: generatePyramidPositions },
+            { name: 'Wave', generator: generateWavePositions },
+            { name: 'Random Cloud', generator: generateRandomCloudPositions }
+        ];
+        let currentShapeIndex = 0;
+        let shapeSwitchInterval = 5000; // milliseconds
+        let lastSwitchTime = 0;
+
+        let targetPositions = null; // 新增：目标位置数组
+        let isTransitioning = false; // 新增：是否正在过渡
+        let transitionProgress = 0; // 新增：过渡进度
+        const transitionDuration = 1.5; // 过渡时长（秒）
+        let lastPositions = null; // 新增：保存切换前的粒子位置
+
+        // UI Elements
+        const shapeSelectorUI = document.getElementById('shapeSelector');
+        const switchSpeedSlider = document.getElementById('switchSpeed');
+        const switchSpeedValueUI = document.getElementById('switchSpeedValue');
+        const rotationSpeedSlider = document.getElementById('rotationSpeedRange');
+        const rotationSpeedValueUI = document.getElementById('rotationSpeedValue');
+        const tooltipUI = document.getElementById('tooltip');
+
+        // 加入噪声扰动的工具函数
+        function addNoise(x, y, z, amount = 0.18) {
+            return [
+                x + (Math.random() - 0.5) * amount,
+                y + (Math.random() - 0.5) * amount,
+                z + (Math.random() - 0.5) * amount
+            ];
+        }
+
+        function generateSpherePositions(count, radius = 5) {
+            const positions = new Float32Array(count * 3);
+            for (let i = 0; i < count; i++) {
+                const phi = Math.acos(-1 + (2 * i) / count);
+                const theta = Math.sqrt(count * Math.PI) * phi;
+                let x = radius * Math.sin(phi) * Math.cos(theta);
+                let y = radius * Math.sin(phi) * Math.sin(theta);
+                let z = radius * Math.cos(phi);
+                [x, y, z] = addNoise(x, y, z, 0.25);
+                positions[i * 3] = x;
+                positions[i * 3 + 1] = y;
+                positions[i * 3 + 2] = z;
+            }
+            return positions;
+        }
+
+        function generateTorusPositions(count, majorRadius = 4, minorRadius = 1.5) {
+            const positions = new Float32Array(count * 3);
+            for (let i = 0; i < count; i++) {
+                const u = Math.random() * Math.PI * 2;
+                const v = Math.random() * Math.PI * 2;
+                let x = (majorRadius + minorRadius * Math.cos(v)) * Math.cos(u);
+                let y = (majorRadius + minorRadius * Math.cos(v)) * Math.sin(u);
+                let z = minorRadius * Math.sin(v);
+                [x, y, z] = addNoise(x, y, z, 0.18);
+                positions[i * 3] = x;
+                positions[i * 3 + 1] = y;
+                positions[i * 3 + 2] = z;
+            }
+            return positions;
+        }
+
+        function generateCubePositions(count, size = 6) {
+            const positions = new Float32Array(count * 3);
+            const halfSize = size / 2;
+            for (let i = 0; i < count; i++) {
+                const side = Math.floor(Math.random() * 6);
+                let x, y, z;
+                const r1 = Math.random() * size - halfSize;
+                const r2 = Math.random() * size - halfSize;
+                if (side === 0) { x = halfSize; y = r1; z = r2; }
+                else if (side === 1) { x = -halfSize; y = r1; z = r2; }
+                else if (side === 2) { y = halfSize; x = r1; z = r2; }
+                else if (side === 3) { y = -halfSize; x = r1; z = r2; }
+                else if (side === 4) { z = halfSize; x = r1; y = r2; }
+                else { z = -halfSize; x = r1; y = r2; }
+                [x, y, z] = addNoise(x, y, z, 0.18);
+                positions[i * 3] = x;
+                positions[i * 3 + 1] = y;
+                positions[i * 3 + 2] = z;
+            }
+            return positions;
+        }
+
+        function generateHeartPositions(count, scale = 4) {
+            const positions = new Float32Array(count * 3);
+            for (let i = 0; i < count; i++) {
+                const t = Math.PI * 2 * (i / count);
+                let x = scale * 16 * Math.pow(Math.sin(t), 3) / 16;
+                let y = scale * (13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t)) / 16;
+                let z = (Math.random() - 0.5) * scale * 0.8;
+                [x, y, z] = addNoise(x, y, z, 0.22);
+                positions[i * 3] = x;
+                positions[i * 3 + 1] = y;
+                positions[i * 3 + 2] = z;
+            }
+            return positions;
+        }
+
+        function generateStarPositions(count, scale = 4, points = 5) {
+            const positions = new Float32Array(count * 3);
+            for (let i = 0; i < count; i++) {
+                const angle = (i / count) * Math.PI * 2 * points;
+                const r = (i % 2 === 0) ? scale : scale * 0.5;
+                let x = r * Math.cos(angle);
+                let y = r * Math.sin(angle);
+                let z = (Math.random() - 0.5) * scale * 0.8;
+                [x, y, z] = addNoise(x, y, z, 0.22);
+                positions[i * 3] = x;
+                positions[i * 3 + 1] = y;
+                positions[i * 3 + 2] = z;
+            }
+            return positions;
+        }
+
+        function generatePetalBallPositions(count, radius = 4, petals = 8) {
+            const positions = new Float32Array(count * 3);
+            for (let i = 0; i < count; i++) {
+                const phi = Math.acos(-1 + (2 * i) / count);
+                const theta = Math.sqrt(count * Math.PI) * phi;
+                let r = radius + Math.sin(petals * theta) * 0.7;
+                let x = r * Math.sin(phi) * Math.cos(theta);
+                let y = r * Math.sin(phi) * Math.sin(theta);
+                let z = r * Math.cos(phi);
+                [x, y, z] = addNoise(x, y, z, 0.22);
+                positions[i * 3] = x;
+                positions[i * 3 + 1] = y;
+                positions[i * 3 + 2] = z;
+            }
+            return positions;
+        }
+
+        function generateNebulaPositions(count, scale = 18, arms = 3) {
+            // scale更大，arms更多，整体更发散且有旋臂，发散区域更亮
+            const positions = new Float32Array(count * 3);
+            for (let i = 0; i < count; i++) {
+                // 半径分布：sigmoid控制渐变，中心高密度，外围平滑稀疏
+                let t = Math.random();
+                let baseR = scale * (Math.pow(t, 1.5) * 0.7 + 0.3 * Math.pow(t, 0.7));
+                // 角度
+                let theta = Math.random() * Math.PI * 2;
+                // 旋臂角度扰动
+                let arm = Math.floor(Math.random() * arms);
+                let armAngle = (arm / arms) * Math.PI * 2;
+                let spiralOffset = 1.2 * baseR + Math.random() * 0.7;
+                let spiral = 0.55 * baseR * Math.sin(arms * theta + spiralOffset);
+                let r = baseR + spiral * Math.exp(-baseR / scale * 0.7); // 臂在中心更明显，外围渐弱
+                // 臂内高密度，臂间低密度
+                let armStrength = Math.pow(Math.abs(Math.cos(arms * theta / 2)), 2.5);
+                let density = 0.7 * Math.exp(-r * 0.18) + 0.3 * armStrength;
+                // 发散区域亮度提升
+                if (r > scale * 0.6) density += 0.25 * Math.random();
+                // 局部浓密/稀疏
+                if (Math.random() > 0.97) density *= 0.2 + Math.random() * 0.5; // 极稀疏区
+                if (Math.random() > 0.98) density *= 2.5; // 极浓密区
+                // 空间坐标
+                let x = r * Math.cos(theta);
+                let y = r * Math.sin(theta);
+                // z轴分布，中心厚、外围薄
+                let z = (Math.random() - 0.5) * (1.5 + 2.2 * Math.exp(-r * 0.3));
+                x *= density;
+                y *= density;
+                z *= density;
+                // 多层噪声扰动，制造云雾感
+                [x, y, z] = addNoise(x, y, z, 1.1 * (1 - density) + 0.32);
+                positions[i * 3] = x;
+                positions[i * 3 + 1] = y;
+                positions[i * 3 + 2] = z;
+            }
+            return positions;
+        }
+
+        function generateRandomCloudPositions(count, spread = 6) {
+            const positions = new Float32Array(count * 3);
+            for (let i = 0; i < count; i++) {
+                positions[i * 3] = (Math.random() - 0.5) * spread * 2;
+                positions[i * 3 + 1] = (Math.random() - 0.5) * spread * 2;
+                positions[i * 3 + 2] = (Math.random() - 0.5) * spread * 2;
+            }
+            return positions;
+        }
+
+        // 埃及金字塔
+        function generatePyramidPositions(count, scale = 18) {
+            const positions = new Float32Array(count * 3);
+            for (let i = 0; i < count; i++) {
+                // 随机分布在四个三角面或底面
+                const face = Math.floor(Math.random() * 4);
+                let u = Math.random();
+                let v = Math.random() * (1 - u);
+                let x, y, z;
+                if (face === 0) { // 底面
+                    x = (u - 0.5) * scale * 2;
+                    y = 0;
+                    z = (v - 0.5) * scale * 2;
+                } else { // 三角面
+                    let base = [
+                        [0, 0], [scale, 0], [scale / 2, Math.sqrt(3) / 2 * scale]
+                    ];
+                    let a = base[(face - 1) % 3];
+                    let b = base[face % 3];
+                    let apex = [scale / 2, Math.sqrt(3) / 6 * scale, scale];
+                    let px = (1 - u - v) * a[0] + u * b[0] + v * apex[0];
+                    let py = (1 - u - v) * 0 + u * 0 + v * apex[2];
+                    let pz = (1 - u - v) * a[1] + u * b[1] + v * apex[1];
+                    x = px - scale / 2;
+                    y = py;
+                    z = pz - Math.sqrt(3) / 6 * scale;
+                }
+                [x, y, z] = addNoise(x, y, z, 0.18);
+                positions[i * 3] = x;
+                positions[i * 3 + 1] = y;
+                positions[i * 3 + 2] = z;
+            }
+            return positions;
+        }
+
+        // 动态水面波浪
+        function generateWavePositions(count, scale = 10, gridN = 160) {
+            // gridN: 网格边长粒子数，count建议为gridN*gridN
+            // 动态更明显，密度更高
+            const positions = new Float32Array(count * 3);
+            const time = Date.now() * 0.001;
+            let idx = 0;
+            const N = gridN;
+            for (let i = 0; i < N; i++) {
+                for (let j = 0; j < N; j++) {
+                    let x = (i / (N - 1) - 0.5) * scale * 2;
+                    let z = (j / (N - 1) - 0.5) * scale * 2;
+                    // 多重正弦波叠加，动态水面
+                    let y = 0;
+                    y += Math.sin(x * 1.2 + time * 1.2) * 1.2;
+                    y += Math.cos(z * 1.5 - time * 1.1) * 0.9;
+                    y += Math.sin((x + z) * 0.7 + time * 0.7) * 0.7;
+                    y += Math.sin(Math.sqrt(x * x + z * z) * 2.2 - time * 1.7) * 1.1;
+                    y *= 0.8;
+                    let [nx, ny, nz] = addNoise(x, y, z, 0.06);
+                    positions[idx * 3] = nx;
+                    positions[idx * 3 + 1] = ny;
+                    positions[idx * 3 + 2] = nz;
+                    idx++;
+                    if (idx >= count) break;
+                }
+                if (idx >= count) break;
+            }
+            return positions;
+        }
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 15;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+
+            const renderScene = new RenderPass(scene, camera);
+            const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.0, 0.4, 0.85);
+            bloomPass.threshold = 0.21;
+            bloomPass.strength = 1.2;
+            bloomPass.radius = 0.55;
+            composer = new EffectComposer(renderer);
+            composer.addPass(renderScene);
+            composer.addPass(bloomPass);
+
+            // Populate shape selector UI
+            shapes.forEach((shape, index) => {
+                const option = document.createElement('option');
+                option.value = index;
+                option.textContent = shape.name;
+                shapeSelectorUI.appendChild(option);
+            });
+            // Manual shape selection (optional, but good for testing)
+            // shapeSelectorUI.addEventListener('change', (event) => {
+            //    currentShapeIndex = parseInt(event.target.value);
+            //    createOrUpdateParticles();
+            //    lastSwitchTime = Date.now(); // Reset timer
+            // });
+
+
+            // Music
+            const musicFileInput = document.getElementById('musicFile');
+            const audioPlayer = document.getElementById('audioPlayer');
+            musicFileInput.addEventListener('change', function(event) {
+                const file = event.target.files[0];
+                if (file) {
+                    const objectURL = URL.createObjectURL(file);
+                    audioPlayer.src = objectURL;
+                    audioPlayer.play();
+                    // To free up memory when the track is done or a new one is loaded
+                    // audioPlayer.onended = () => URL.revokeObjectURL(objectURL);
+                }
+            });
+            // Example: Set a default music URL if you have one
+            // audioPlayer.src = "your_music_file.mp3"; // Replace with your actual music file URL
+            // audioPlayer.play(); // Optional: auto-play
+
+            // Switch speed control
+            switchSpeedSlider.addEventListener('input', (event) => {
+                shapeSwitchInterval = parseInt(event.target.value) * 1000;
+                switchSpeedValueUI.textContent = event.target.value;
+            });
+            switchSpeedValueUI.textContent = switchSpeedSlider.value; // Initial display
+            shapeSwitchInterval = parseInt(switchSpeedSlider.value) * 1000; // Initial value
+
+             // Rotation speed control
+            rotationSpeedSlider.addEventListener('input', (event) => {
+                currentParticleRotationSpeed = parseFloat(event.target.value) * 0.001; // Scale for smoother control
+                rotationSpeedValueUI.textContent = event.target.value;
+            });
+            rotationSpeedValueUI.textContent = rotationSpeedSlider.value; // Initial display
+            currentParticleRotationSpeed = parseFloat(rotationSpeedSlider.value) * 0.001; // Initial value
+
+
+            // Tooltip for controls
+            const controlElements = document.querySelectorAll('#controls input, #controls select');
+            controlElements.forEach(el => {
+                el.addEventListener('mouseenter', (e) => {
+                    let title = '';
+                    if(e.target.id === 'musicFile') title = 'Click to select a local music file to play';
+                    if(e.target.id === 'shapeSelector') title = 'Current particle shape';
+                    if(e.target.id === 'switchSpeed') title = 'Drag the slider to adjust the shape auto-switch interval (seconds)';
+                    if(e.target.id === 'rotationSpeedRange') title = 'Drag the slider to adjust the particle cloud rotation speed';
+
+                    if (title) {
+                        tooltipUI.textContent = title;
+                        tooltipUI.style.display = 'block';
+                    }
+                });
+                el.addEventListener('mousemove', (e) => {
+                    tooltipUI.style.left = (e.pageX + 10) + 'px';
+                    tooltipUI.style.top = (e.pageY + 10) + 'px';
+                });
+                el.addEventListener('mouseleave', () => {
+                    tooltipUI.style.display = 'none';
+                });
+            });
+
+
+            window.addEventListener('resize', onWindowResize, false);
+            createOrUpdateParticles(); // Initial particle creation
+            animate();
+        }
+
+        function createOrUpdateParticles(smooth = false) {
+            if (!particleSystem) {
+                // 初次创建
+                const currentShapeDef = shapes[currentShapeIndex];
+                const positions = currentShapeDef.generator(particleCount);
+                const colors = new Float32Array(particleCount * 3);
+                const initialColor = new THREE.Color();
+                for (let i = 0; i < particleCount; i++) {
+                    initialColor.setHSL(Math.random(), 1.0, 0.5);
+                    colors[i * 3] = initialColor.r;
+                    colors[i * 3 + 1] = initialColor.g;
+                    colors[i * 3 + 2] = initialColor.b;
+                }
+                const geometry = new THREE.BufferGeometry();
+                geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+                const material = new THREE.PointsMaterial({
+                    size: particleSize,
+                    vertexColors: true,
+                    blending: THREE.AdditiveBlending,
+                    transparent: true,
+                    depthWrite: false
+                });
+                particleSystem = new THREE.Points(geometry, material);
+                scene.add(particleSystem);
+                return;
+            }
+            // 切换形状时，平滑过渡
+            if (smooth) {
+                // 保存当前粒子位置
+                const posAttr = particleSystem.geometry.attributes.position;
+                lastPositions = new Float32Array(posAttr.count * 3);
+                for (let i = 0; i < posAttr.count * 3; i++) {
+                    lastPositions[i] = posAttr.array[i];
+                }
+                // 生成目标位置
+                const currentShapeDef = shapes[currentShapeIndex];
+                targetPositions = currentShapeDef.generator(particleCount);
+                isTransitioning = true;
+                transitionProgress = 0;
+            } else {
+                // 非平滑，直接切换
+                const currentShapeDef = shapes[currentShapeIndex];
+                const positions = currentShapeDef.generator(particleCount);
+                particleSystem.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                particleSystem.geometry.attributes.position.needsUpdate = true;
+            }
+            shapeSelectorUI.value = currentShapeIndex;
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const currentTime = Date.now();
+            // Automatic shape switching
+            if (currentTime - lastSwitchTime > shapeSwitchInterval) {
+                currentShapeIndex = (currentShapeIndex + 1) % shapes.length;
+                createOrUpdateParticles(true); // 平滑切换
+                lastSwitchTime = currentTime;
+            }
+            if (particleSystem) {
+                particleSystem.rotation.x += currentParticleRotationSpeed * 1.5;
+                particleSystem.rotation.y += currentParticleRotationSpeed * 2.2;
+                particleSystem.rotation.z += currentParticleRotationSpeed * 0.7;
+                // 平滑过渡逻辑
+                if (isTransitioning && targetPositions && lastPositions) {
+                    transitionProgress += 1 / 60 / transitionDuration; // 假设60fps
+                    if (transitionProgress >= 1) {
+                        transitionProgress = 1;
+                        isTransitioning = false;
+                        // 直接设置为目标
+                        particleSystem.geometry.setAttribute('position', new THREE.BufferAttribute(targetPositions, 3));
+                        particleSystem.geometry.attributes.position.needsUpdate = true;
+                    } else {
+                        // 插值
+                        const posAttr = particleSystem.geometry.attributes.position;
+                        for (let i = 0; i < posAttr.count * 3; i++) {
+                            posAttr.array[i] = lastPositions[i] + (targetPositions[i] - lastPositions[i]) * transitionProgress;
+                        }
+                        posAttr.needsUpdate = true;
+                    }
+                }
+                const particleColors = particleSystem.geometry.attributes.color;
+                const timeFactor = currentTime * 0.001;
+                const baseHue = (timeFactor * 0.05) % 1; // Slower overall color shift
+
+                for (let i = 0; i < particleCount; i++) {
+                    let color;
+                    // 取粒子空间位置做渐变
+                    const px = particleSystem.geometry.attributes.position.getX(i);
+                    const py = particleSystem.geometry.attributes.position.getY(i);
+                    const pz = particleSystem.geometry.attributes.position.getZ(i);
+                    if(currentColorMode==='red') color = new THREE.Color(0.91,0.3,0.24);
+                    else if(currentColorMode==='green') color = new THREE.Color(0.15,0.68,0.38);
+                    else if(currentColorMode==='blue') color = new THREE.Color(0.16,0.5,0.94);
+                    else if(currentColorMode==='yellow') color = new THREE.Color(0.97,0.83,0.11);
+                    else if(currentColorMode==='purple') color = new THREE.Color(0.61,0.35,0.71);
+                    else if(currentColorMode==='redblue') {
+                        let t = (px+py+pz)*0.09+0.5; t = Math.max(0,Math.min(1,t));
+                        color = new THREE.Color().lerpColors(new THREE.Color(1,0,0.2),new THREE.Color(0,0.85,1),t);
+                    } else if(currentColorMode==='blueyellow') {
+                        let t = (px-pz)*0.13+0.5; t = Math.max(0,Math.min(1,t));
+                        color = new THREE.Color().lerpColors(new THREE.Color(0,0.2,1),new THREE.Color(1,0.95,0),t);
+                    } else if(currentColorMode==='purpleorange') {
+                        let t = (py)*0.15+0.5; t = Math.max(0,Math.min(1,t));
+                        color = new THREE.Color().lerpColors(new THREE.Color(0.6,0,1),new THREE.Color(1,0.45,0),t);
+                    } else if(currentColorMode==='cyanorange') {
+                        let t = (px-py)*0.18+0.5; t = Math.max(0,Math.min(1,t));
+                        color = new THREE.Color().lerpColors(new THREE.Color(0,1,0.97),new THREE.Color(1,0.41,0),t);
+                    } else if(currentColorMode==='pinkcyan') {
+                        let t = (pz)*0.19+0.5; t = Math.max(0,Math.min(1,t));
+                        color = new THREE.Color().lerpColors(new THREE.Color(1,0.31,0.85),new THREE.Color(0,1,0.97),t);
+                    } else {
+                        // 默认HSL渐变
+                        const hueOffset = (px / 10) * 0.01;
+                        const hue = (baseHue + (i / particleCount) * 0.1 + hueOffset) % 1;
+                        color = new THREE.Color().setHSL(hue, 1.0, 0.6);
+                    }
+                    particleColors.setXYZ(i, color.r, color.g, color.b);
+                }
+                particleColors.needsUpdate = true;
+            }
+
+            controls.update();
+            composer.render();
+        }
+
+        // 当前色系
+        let currentColorMode = 'default';
+        // 颜色按钮事件
+        document.addEventListener('DOMContentLoaded',()=>{
+            document.querySelectorAll('.color-btn').forEach(btn=>{
+                btn.onclick = function(){
+                    currentColorMode = this.dataset.color;
+                    document.querySelectorAll('.color-btn').forEach(b=>b.classList.remove('selected'));
+                    this.classList.add('selected');
+                };
+            });
+        });
+
+        // 控制面板折叠逻辑
+        document.addEventListener('DOMContentLoaded',()=>{
+            const toggleBtn = document.getElementById('control-toggle');
+            const panel = document.getElementById('control-panel');
+            if(toggleBtn && panel){
+                toggleBtn.onclick = ()=>{
+                    if(panel.style.display==='none'||panel.style.display===''){
+                        panel.style.display='block';
+                    }else{
+                        panel.style.display='none';
+                    }
+                };
+            }
+        });
+
+        init();
+    </script>
+</body>
+</html>
